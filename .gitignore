@@ -1,0 +1,8 @@
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 131MB — exceeds GitHub's 100MB file limit; download yolov8x.pt separately
+yolov8x.pt
