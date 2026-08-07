@@ -1,4 +1,7 @@
+import cv2
+
 from utils.video import VideoReader
+from utils.drawing import draw_boxes
 from detection.detector import HorseDetector
 
 video = VideoReader("datasets/raw/test.mp4")
