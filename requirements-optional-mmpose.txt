@@ -1,0 +1,18 @@
+# Optional Stage 2 backend: MMPose Horse-10
+# If chumpy fails, install mmpose with --no-deps (see README note below).
+torch>=2.0.0
+mmengine>=0.10.0
+mmcv>=2.0.0,<2.2.0
+mmpose>=1.3.0
+json-tricks
+munkres
+xtcocotools
+matplotlib
+scipy
+pillow
+
+# Install order if chumpy build fails:
+#   pip install torch mmengine openmim
+#   mim install "mmcv>=2.0.1,<2.2.0"
+#   pip install "mmpose>=1.3.0" --no-deps
+#   pip install json-tricks munkres xtcocotools matplotlib scipy pillow
