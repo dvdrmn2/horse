@@ -114,8 +114,10 @@ HORSE10_SKELETON = [
     ("off_hind_fetlock", "off_hind_foot"),
 ]
 
+import os
+
 # Stage 2 pose backend: template | horse10_mmpose | superanimal
-POSE_BACKEND = "template"
+POSE_BACKEND = os.getenv("POSE_BACKEND", "template")
 
 KEYPOINT_SCORE_THRESHOLD = 0.3
 
