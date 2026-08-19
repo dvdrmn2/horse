@@ -115,21 +115,23 @@ HORSE10_SKELETON = [
 ]
 
 import os
+from pathlib import Path
 
 # Stage 2 pose backend: template | horse10_mmpose | superanimal
 POSE_BACKEND = os.getenv("POSE_BACKEND", "template")
 
 KEYPOINT_SCORE_THRESHOLD = 0.3
 
-# MMPose Horse-10 HRNet-W48 (split1) — optional, see requirements-optional.txt
-MMPOSE_CONFIG = (
-    "configs/animal_2d_keypoint/topdown_heatmap/horse10/"
-    "hrnet_w48_horse10_256x256-split1.py"
+# MMPose quadruped pose (AnimalPose HRNet-W48).
+# Horse-10 configs/checkpoints were removed from mmpose 1.3; AnimalPose still ships
+# in the model zoo and works on horses for Stage 2 proof-of-concept.
+MMPOSE_MODEL = os.getenv("MMPOSE_MODEL", "td-hm_hrnet-w48_8xb64-210e_animalpose-256x256")
+MMPOSE_MODEL_DIR = os.getenv("MMPOSE_MODEL_DIR", "/opt/mmpose-model")
+MMPOSE_CONFIG = os.getenv(
+    "MMPOSE_CONFIG",
+    str(Path(MMPOSE_MODEL_DIR) / f"{MMPOSE_MODEL}.py"),
 )
-MMPOSE_CHECKPOINT = (
-    "https://download.openmmlab.com/mmpose/animal/hrnet/"
-    "hrnet_w48_horse10_256x256_split1-3c950d3b_20210405.pth"
-)
+MMPOSE_CHECKPOINT = os.getenv("MMPOSE_CHECKPOINT", "")
 
 # SuperAnimal quadruped — optional, see requirements-optional.txt
 SUPERANIMAL_MODEL = "superanimal_quadruped"

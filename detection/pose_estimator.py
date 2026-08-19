@@ -34,7 +34,7 @@ class PoseEstimator:
 
         try:
             raw_detections = backend.estimate(frame, detections)
-        except (ImportError, NotImplementedError, FileNotFoundError) as error:
+        except (ImportError, NotImplementedError, FileNotFoundError, ValueError, OSError, RuntimeError) as error:
             self._warn_once(error)
             backend = self._fallback
             schema_name = backend.schema_name

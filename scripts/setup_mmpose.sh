@@ -10,6 +10,13 @@ fi
 
 source .venv/bin/activate
 
+if python -c "import mmpose, mmcv" 2>/dev/null; then
+  echo "MMPose already installed in .venv — skipping."
+  echo "  export POSE_BACKEND=horse10_mmpose"
+  echo "  python main.py"
+  exit 0
+fi
+
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install torch mmengine openmim
 python -m mim install "mmcv>=2.0.1,<2.2.0"
@@ -20,6 +27,6 @@ python -m pip install json-tricks munkres matplotlib scipy pillow
 python -m pip install xtcocotools || echo "Warning: xtcocotools install failed; pose may still work."
 
 echo
-echo "Optional MMPose deps installed."
+echo "Optional MMPose deps installed (one-time setup)."
 echo "  export POSE_BACKEND=horse10_mmpose"
 echo "  python main.py"

@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+output/
+
 
 # 131MB — exceeds GitHub's 100MB file limit; download yolov8x.pt separately
 yolov8x.pt

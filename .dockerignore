@@ -1,0 +1,9 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.DS_Store
+output
+*.mp4
+!datasets/raw/test.mp4

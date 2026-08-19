@@ -1,0 +1,14 @@
+services:
+  horse:
+    build: .
+    platform: linux/amd64
+    volumes:
+      - .:/app
+      - ./output:/app/output
+    environment:
+      POSE_BACKEND: horse10_mmpose
+      MMPOSE_MODEL_DIR: /opt/mmpose-model
+      MMPOSE_CONFIG: /opt/mmpose-model/td-hm_hrnet-w48_8xb64-210e_animalpose-256x256.py
+      HEADLESS: "1"
+      INPUT_VIDEO: datasets/raw/test.mp4
+      OUTPUT_VIDEO: /app/output/annotated.mp4
