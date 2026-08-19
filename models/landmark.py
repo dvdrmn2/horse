@@ -14,10 +14,24 @@ class Landmark:
     x: float | None = None
     y: float | None = None
     confidence: float | None = None
+    visible: bool = False
+    occluded: bool = False
+    interpolated: bool = False
+    predicted: bool = False
+    outlier: bool = False
+    identity_confidence: float = 1.0
+    effective_confidence: float | None = None
 
     @property
-    def visible(self) -> bool:
-        return self.x is not None and self.y is not None
+    def is_drawable(self) -> bool:
+        return self.visible and not self.outlier and self.x is not None and self.y is not None
+
+    @property
+    def is_reliable(self) -> bool:
+        if not self.is_drawable:
+            return False
+        threshold = self.effective_confidence if self.effective_confidence is not None else self.confidence
+        return threshold is not None and threshold >= KEYPOINT_SCORE_THRESHOLD
 
 
 @dataclass
@@ -57,10 +71,20 @@ class LandmarkSet:
                         x=float(x),
                         y=float(y),
                         confidence=score,
+                        visible=True,
+                        effective_confidence=score,
                     )
                 )
             else:
-                landmarks.append(Landmark(name=name, index=index))
+                landmarks.append(
+                    Landmark(
+                        name=name,
+                        index=index,
+                        confidence=score,
+                        visible=False,
+                        effective_confidence=score,
+                    )
+                )
 
         return cls(landmarks=landmarks, schema=tuple(schema))
 
@@ -74,6 +98,9 @@ class LandmarkSet:
         x: float,
         y: float,
         confidence: float | None = None,
+        *,
+        visible: bool = True,
+        identity_confidence: float = 1.0,
     ) -> LandmarkSet:
         index = self.schema.index(name)
         landmark = replace(
@@ -81,11 +108,27 @@ class LandmarkSet:
             x=x,
             y=y,
             confidence=confidence,
+            visible=visible,
+            effective_confidence=confidence,
+            identity_confidence=identity_confidence,
         )
+        landmarks = self.landmarks.copy()
+        landmarks[index] = landmark
+        return LandmarkSet(landmarks=landmarks, schema=self.schema)
+
+    def replace_landmark(self, name: str, landmark: Landmark) -> LandmarkSet:
+        index = self.schema.index(name)
         landmarks = self.landmarks.copy()
         landmarks[index] = landmark
         return LandmarkSet(landmarks=landmarks, schema=self.schema)
 
     @property
     def visible_landmarks(self) -> list[Landmark]:
-        return [landmark for landmark in self.landmarks if landmark.visible]
+        return [landmark for landmark in self.landmarks if landmark.is_drawable]
+
+    @property
+    def reliable_landmarks(self) -> list[Landmark]:
+        return [landmark for landmark in self.landmarks if landmark.is_reliable]
+
+    def count_reliable(self) -> int:
+        return len(self.reliable_landmarks)

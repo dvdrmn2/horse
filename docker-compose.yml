@@ -12,3 +12,4 @@ services:
       HEADLESS: "1"
       INPUT_VIDEO: datasets/raw/test.mp4
       OUTPUT_VIDEO: /app/output/annotated.mp4
+      OUTPUT_TRAJECTORIES: /app/output/annotated.trajectories.json

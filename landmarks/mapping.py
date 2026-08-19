@@ -45,7 +45,13 @@ ANIMALPOSE_TO_CANONICAL = {
     "R_B_Paw": "right_hind_hoof",
 }
 
-# Best-effort mapping from Horse-10 (camera-relative) to our canonical schema.
+# Canonical landmarks AnimalPose can populate today (16 of 29).
+# Does NOT include hock, fetlock, shoulder, hip, poll, spine_mid, or croup.
+ANIMALPOSE_CANONICAL_COVERAGE = frozenset(ANIMALPOSE_TO_CANONICAL.values())
+
+ANIMALPOSE_UNMAPPED_CANONICAL = [
+    name for name in CANONICAL_LANDMARKS if name not in ANIMALPOSE_CANONICAL_COVERAGE
+]
 # Unmapped canonical points stay empty until Stage 4/5 custom training.
 HORSE10_TO_CANONICAL = {
     "nose": "nose",
