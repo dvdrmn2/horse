@@ -2,6 +2,7 @@ import cv2
 
 from config.config import CANONICAL_SKELETON
 from models.horse import HorseInstance
+from models.landmark_types import LandmarkStatus
 from models.session import FrameRecord
 
 
@@ -50,7 +51,12 @@ def draw_horse_landmarks(frame, horse: HorseInstance):
         if not landmark.is_drawable:
             continue
 
-        color = (0, 128, 255) if landmark.is_reliable else (160, 160, 160)
+        if landmark.status is LandmarkStatus.DERIVED:
+            color = (200, 64, 255)
+        elif landmark.is_reliable:
+            color = (0, 128, 255)
+        else:
+            color = (160, 160, 160)
         cv2.circle(frame, (int(landmark.x), int(landmark.y)), 4, color, -1)
 
     return frame

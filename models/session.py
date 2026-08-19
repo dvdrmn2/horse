@@ -63,6 +63,8 @@ class SessionHistory:
                     "y": landmark.y,
                     "confidence": landmark.confidence,
                     "effective_confidence": landmark.effective_confidence,
+                    "status": landmark.status.value,
+                    "source": landmark.source.value,
                     "visible": landmark.visible,
                     "reliable": landmark.is_reliable,
                     "outlier": landmark.outlier,
@@ -88,6 +90,23 @@ class SessionHistory:
                 counts[landmark.name] = counts.get(landmark.name, 0) + 1
 
         return counts
+
+    def landmark_status_breakdown(self, track_id: int) -> dict[str, dict[str, int]]:
+        """Count frames per landmark status for one track."""
+
+        breakdown: dict[str, dict[str, int]] = {}
+
+        for frame in self.frames:
+            horse = next((item for item in frame.horses if item.track_id == track_id), None)
+            if horse is None or horse.landmarks is None:
+                continue
+
+            for landmark in horse.landmarks.landmarks:
+                status_key = landmark.status.value
+                landmark_counts = breakdown.setdefault(landmark.name, {})
+                landmark_counts[status_key] = landmark_counts.get(status_key, 0) + 1
+
+        return breakdown
 
     def build_trajectory_index(self) -> dict[str, dict[str, list[dict]]]:
         index: dict[str, dict[str, list[dict]]] = {}
@@ -195,6 +214,8 @@ class SessionHistory:
                                     "y": landmark.y,
                                     "confidence": landmark.confidence,
                                     "effective_confidence": landmark.effective_confidence,
+                                    "status": landmark.status.value,
+                                    "source": landmark.source.value,
                                     "visible": landmark.visible,
                                     "occluded": landmark.occluded,
                                     "outlier": landmark.outlier,

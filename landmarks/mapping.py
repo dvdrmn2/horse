@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from config.config import CANONICAL_LANDMARKS, HORSE10_LANDMARKS
+from config.config import CANONICAL_LANDMARKS, HORSE10_LANDMARKS, KEYPOINT_SCORE_THRESHOLD
+from landmarks.derived import apply_derived_landmarks
 from models.landmark import LandmarkSet
+from models.landmark_types import LandmarkSource, LandmarkStatus
+from models.skeleton import Skeleton
 
 ANIMALPOSE_LANDMARKS = (
     "L_Eye",
@@ -45,14 +48,12 @@ ANIMALPOSE_TO_CANONICAL = {
     "R_B_Paw": "right_hind_hoof",
 }
 
-# Canonical landmarks AnimalPose can populate today (16 of 29).
-# Does NOT include hock, fetlock, shoulder, hip, poll, spine_mid, or croup.
 ANIMALPOSE_CANONICAL_COVERAGE = frozenset(ANIMALPOSE_TO_CANONICAL.values())
 
 ANIMALPOSE_UNMAPPED_CANONICAL = [
     name for name in CANONICAL_LANDMARKS if name not in ANIMALPOSE_CANONICAL_COVERAGE
 ]
-# Unmapped canonical points stay empty until Stage 4/5 custom training.
+
 HORSE10_TO_CANONICAL = {
     "nose": "nose",
     "eye": "left_eye",
@@ -78,13 +79,41 @@ HORSE10_TO_CANONICAL = {
     "off_hind_foot": "right_hind_hoof",
 }
 
+HORSE10_CANONICAL_COVERAGE = frozenset(HORSE10_TO_CANONICAL.values())
+
+HORSE10_UNMAPPED_CANONICAL = [
+    name for name in CANONICAL_LANDMARKS if name not in HORSE10_CANONICAL_COVERAGE
+]
+
+
+def _status_for_source_point(confidence: float | None, visible: bool) -> LandmarkStatus:
+    if not visible or confidence is None:
+        return LandmarkStatus.NOT_VISIBLE
+    if confidence >= KEYPOINT_SCORE_THRESHOLD:
+        return LandmarkStatus.DETECTED
+    if confidence > 0:
+        return LandmarkStatus.LOW_CONFIDENCE
+    return LandmarkStatus.NOT_VISIBLE
+
+
+def _initialize_unmapped(target: LandmarkSet, unmapped_names: list[str]) -> LandmarkSet:
+    for name in unmapped_names:
+        target = target.with_status(name, LandmarkStatus.UNMAPPED, LandmarkSource.NONE)
+    return target
+
 
 def map_horse10_to_canonical(source: LandmarkSet) -> LandmarkSet:
-    target = LandmarkSet.template(CANONICAL_LANDMARKS)
+    target = _initialize_unmapped(LandmarkSet.template(CANONICAL_LANDMARKS), HORSE10_UNMAPPED_CANONICAL)
 
     for source_name, target_name in HORSE10_TO_CANONICAL.items():
         landmark = source.get(source_name)
-        if landmark is None or not landmark.visible:
+        if landmark is None:
+            target = target.with_status(target_name, LandmarkStatus.NOT_VISIBLE, LandmarkSource.HORSE10)
+            continue
+
+        status = _status_for_source_point(landmark.confidence, landmark.visible)
+        if status is LandmarkStatus.NOT_VISIBLE:
+            target = target.with_status(target_name, status, LandmarkSource.HORSE10)
             continue
 
         target = target.with_point(
@@ -92,17 +121,26 @@ def map_horse10_to_canonical(source: LandmarkSet) -> LandmarkSet:
             landmark.x,
             landmark.y,
             landmark.confidence,
+            visible=True,
+            status=status,
+            source=LandmarkSource.HORSE10,
         )
 
-    return target
+    return apply_derived_landmarks(target)
 
 
 def map_animalpose_to_canonical(source: LandmarkSet) -> LandmarkSet:
-    target = LandmarkSet.template(CANONICAL_LANDMARKS)
+    target = _initialize_unmapped(LandmarkSet.template(CANONICAL_LANDMARKS), ANIMALPOSE_UNMAPPED_CANONICAL)
 
     for source_name, target_name in ANIMALPOSE_TO_CANONICAL.items():
         landmark = source.get(source_name)
-        if landmark is None or not landmark.visible:
+        if landmark is None:
+            target = target.with_status(target_name, LandmarkStatus.NOT_VISIBLE, LandmarkSource.ANIMALPOSE)
+            continue
+
+        status = _status_for_source_point(landmark.confidence, landmark.visible)
+        if status is LandmarkStatus.NOT_VISIBLE:
+            target = target.with_status(target_name, status, LandmarkSource.ANIMALPOSE)
             continue
 
         target = target.with_point(
@@ -110,9 +148,12 @@ def map_animalpose_to_canonical(source: LandmarkSet) -> LandmarkSet:
             landmark.x,
             landmark.y,
             landmark.confidence,
+            visible=True,
+            status=status,
+            source=LandmarkSource.ANIMALPOSE,
         )
 
-    return target
+    return apply_derived_landmarks(target)
 
 
 def map_to_canonical(source: LandmarkSet, source_schema: str) -> LandmarkSet:
@@ -128,3 +169,7 @@ def map_to_canonical(source: LandmarkSet, source_schema: str) -> LandmarkSet:
         return source
 
     raise ValueError(f"Unsupported landmark schema: {source_schema}")
+
+
+def to_skeleton(landmarks: LandmarkSet, backend: str) -> Skeleton:
+    return Skeleton.from_landmark_set(landmarks, backend=backend)

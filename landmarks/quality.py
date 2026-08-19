@@ -6,7 +6,9 @@ from dataclasses import dataclass, field, replace
 
 from config.config import KEYPOINT_SCORE_THRESHOLD
 from config.landmark_spec import LANDMARK_DEFINITIONS, ViewName, observable_landmarks_for_view
+from landmarks.temporal import get_motion_profile, is_streaming_outlier
 from models.landmark import Landmark
+from models.landmark_types import LandmarkStatus
 from models.session import FrameRecord
 
 
@@ -34,8 +36,9 @@ class LandmarkQualityController:
     """Temporal outlier rejection and view-adjusted confidence scoring."""
 
     jump_threshold_ratio: float = 0.55
-    history_length: int = 5
+    history_length: int = 8
     _history: dict[tuple[int, str], deque[tuple[float, float, float]]] = field(default_factory=dict)
+    _last_bbox: dict[int, list[float]] = field(default_factory=dict)
 
     def refine(self, frame: FrameRecord) -> FrameRecord:
         observable_names = set(observable_landmarks_for_view(frame.view, min_score=0.45))
@@ -46,6 +49,7 @@ class LandmarkQualityController:
                 continue
 
             max_jump = self.jump_threshold_ratio * bbox_diagonal(horse.bbox)
+            last_bbox = self._last_bbox.get(horse.track_id)
             updated_landmarks = []
 
             for landmark in horse.landmarks.landmarks:
@@ -56,10 +60,14 @@ class LandmarkQualityController:
                     max_jump,
                     observable_names,
                     horse.identity_confidence,
+                    horse.bbox,
+                    last_bbox,
                 )
                 updated_landmarks.append(updated)
                 if updated.is_reliable:
                     reliable_count += 1
+
+            self._last_bbox[horse.track_id] = list(horse.bbox)
 
             horse.landmarks = horse.landmarks.__class__(
                 landmarks=updated_landmarks,
@@ -78,6 +86,8 @@ class LandmarkQualityController:
         max_jump: float,
         observable_names: set[str],
         identity_confidence: float,
+        bbox: list[float],
+        last_bbox: list[float] | None,
     ) -> Landmark:
         base_confidence = landmark.confidence or 0.0
         view_score = view_confidence_multiplier(view, landmark.name)
@@ -91,20 +101,29 @@ class LandmarkQualityController:
         if not updated.visible or updated.x is None or updated.y is None:
             return updated
 
+        if updated.status in {LandmarkStatus.UNMAPPED, LandmarkStatus.UNAVAILABLE}:
+            return updated
+
         history_key = (track_id, landmark.name)
         history = self._history.setdefault(history_key, deque(maxlen=self.history_length))
 
-        if history:
-            last_x, last_y, _ = history[-1]
-            jump = math.hypot(updated.x - last_x, updated.y - last_y)
-            if jump > max_jump:
-                updated = replace(
-                    updated,
-                    outlier=True,
-                    visible=False,
-                    effective_confidence=min(effective, KEYPOINT_SCORE_THRESHOLD * 0.5),
-                )
-                return updated
+        profile = get_motion_profile(landmark.name)
+        if history and is_streaming_outlier(
+            updated.x,
+            updated.y,
+            history,
+            profile=profile,
+            max_jump=max_jump,
+            bbox=bbox,
+            last_bbox=last_bbox,
+        ):
+            updated = replace(
+                updated,
+                outlier=True,
+                visible=False,
+                effective_confidence=min(effective, KEYPOINT_SCORE_THRESHOLD * 0.5),
+            )
+            return updated
 
         history.append((updated.x, updated.y, base_confidence))
         return updated

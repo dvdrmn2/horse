@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from config.config import KEYPOINT_SCORE_THRESHOLD
+from models.landmark_types import LandmarkSource, LandmarkStatus
 
 
 @dataclass
@@ -14,6 +15,8 @@ class Landmark:
     x: float | None = None
     y: float | None = None
     confidence: float | None = None
+    status: LandmarkStatus = LandmarkStatus.UNAVAILABLE
+    source: LandmarkSource = LandmarkSource.NONE
     visible: bool = False
     occluded: bool = False
     interpolated: bool = False
@@ -24,11 +27,24 @@ class Landmark:
 
     @property
     def is_drawable(self) -> bool:
-        return self.visible and not self.outlier and self.x is not None and self.y is not None
+        return (
+            self.visible
+            and not self.outlier
+            and self.x is not None
+            and self.y is not None
+            and self.status
+            in {
+                LandmarkStatus.DETECTED,
+                LandmarkStatus.DERIVED,
+                LandmarkStatus.LOW_CONFIDENCE,
+            }
+        )
 
     @property
     def is_reliable(self) -> bool:
         if not self.is_drawable:
+            return False
+        if self.status is LandmarkStatus.LOW_CONFIDENCE:
             return False
         threshold = self.effective_confidence if self.effective_confidence is not None else self.confidence
         return threshold is not None and threshold >= KEYPOINT_SCORE_THRESHOLD
@@ -44,7 +60,12 @@ class LandmarkSet:
         return cls(
             schema=tuple(schema),
             landmarks=[
-                Landmark(name=name, index=index)
+                Landmark(
+                    name=name,
+                    index=index,
+                    status=LandmarkStatus.UNAVAILABLE,
+                    source=LandmarkSource.NONE,
+                )
                 for index, name in enumerate(schema)
             ],
         )
@@ -55,6 +76,8 @@ class LandmarkSet:
         keypoints: np.ndarray,
         scores: np.ndarray,
         schema: list[str],
+        *,
+        source: LandmarkSource = LandmarkSource.NONE,
         score_threshold: float = KEYPOINT_SCORE_THRESHOLD,
     ) -> LandmarkSet:
         landmarks = []
@@ -71,6 +94,22 @@ class LandmarkSet:
                         x=float(x),
                         y=float(y),
                         confidence=score,
+                        status=LandmarkStatus.DETECTED,
+                        source=source,
+                        visible=True,
+                        effective_confidence=score,
+                    )
+                )
+            elif score > 0:
+                landmarks.append(
+                    Landmark(
+                        name=name,
+                        index=index,
+                        x=float(x),
+                        y=float(y),
+                        confidence=score,
+                        status=LandmarkStatus.LOW_CONFIDENCE,
+                        source=source,
                         visible=True,
                         effective_confidence=score,
                     )
@@ -81,6 +120,8 @@ class LandmarkSet:
                         name=name,
                         index=index,
                         confidence=score,
+                        status=LandmarkStatus.NOT_VISIBLE,
+                        source=source,
                         visible=False,
                         effective_confidence=score,
                     )
@@ -101,6 +142,8 @@ class LandmarkSet:
         *,
         visible: bool = True,
         identity_confidence: float = 1.0,
+        status: LandmarkStatus = LandmarkStatus.DETECTED,
+        source: LandmarkSource = LandmarkSource.NONE,
     ) -> LandmarkSet:
         index = self.schema.index(name)
         landmark = replace(
@@ -111,9 +154,33 @@ class LandmarkSet:
             visible=visible,
             effective_confidence=confidence,
             identity_confidence=identity_confidence,
+            status=status,
+            source=source,
         )
         landmarks = self.landmarks.copy()
         landmarks[index] = landmark
+        return LandmarkSet(landmarks=landmarks, schema=self.schema)
+
+    def with_status(
+        self,
+        name: str,
+        status: LandmarkStatus,
+        source: LandmarkSource | None = None,
+    ) -> LandmarkSet:
+        index = self.schema.index(name)
+        landmark = self.landmarks[index]
+        updated = replace(
+            landmark,
+            status=status,
+            source=source if source is not None else landmark.source,
+            visible=False,
+            x=None,
+            y=None,
+            confidence=None,
+            effective_confidence=None,
+        )
+        landmarks = self.landmarks.copy()
+        landmarks[index] = updated
         return LandmarkSet(landmarks=landmarks, schema=self.schema)
 
     def replace_landmark(self, name: str, landmark: Landmark) -> LandmarkSet:
@@ -132,3 +199,10 @@ class LandmarkSet:
 
     def count_reliable(self) -> int:
         return len(self.reliable_landmarks)
+
+    def count_by_status(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for landmark in self.landmarks:
+            key = landmark.status.value
+            counts[key] = counts.get(key, 0) + 1
+        return counts

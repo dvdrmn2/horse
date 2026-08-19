@@ -14,6 +14,7 @@ from config.config import (
 from detection.pose_backends.base import PoseBackend
 from models.detection import Detection
 from models.landmark import LandmarkSet
+from models.landmark_types import LandmarkSource
 
 
 class Horse10MMPoseBackend(PoseBackend):
@@ -185,6 +186,7 @@ class Horse10MMPoseBackend(PoseBackend):
                         keypoints,
                         scores,
                         schema,
+                        source=LandmarkSource.ANIMALPOSE,
                         score_threshold=self.score_threshold,
                     ),
                 )
