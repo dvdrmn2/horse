@@ -16,7 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from landmarks.view import ViewDiagnosticSnapshot, ViewScores, ViewSmoother, build_view_diagnostics
+from landmarks.view import (
+    ViewScores,
+    ViewSmoother,
+    build_view_diagnostics,
+    extract_view_features,
+)
 from models.horse import HorseInstance
 from models.landmark import Landmark, LandmarkSet
 from models.landmark_types import LandmarkSource, LandmarkStatus
@@ -24,6 +29,8 @@ from models.landmark_types import LandmarkSource, LandmarkStatus
 FEATURE_KEYS = (
     "stifle_separation_px",
     "stifle_separation_ratio",
+    "body_horizontal_span_px",
+    "body_vertical_span_px",
     "body_width_px",
     "body_length_px",
     "width_length_ratio",
@@ -33,6 +40,18 @@ FEATURE_KEYS = (
     "left_right_symmetry",
     "visible_landmarks",
 )
+
+
+def _feature_value(item: FrameDiagnostic, key: str) -> float | None:
+    payload = item.raw.features.get(key)
+    if isinstance(payload, dict):
+        if not payload.get("available"):
+            return None
+        value = payload.get("value")
+        return float(value) if value is not None else None
+    if payload is None:
+        return None
+    return float(payload)
 
 
 def horse_from_frame(frame: dict, track_id: int | None = None) -> HorseInstance | None:
@@ -110,6 +129,8 @@ class FrameDiagnostic:
     raw: ViewDiagnosticSnapshot
     smoothed_distribution: dict[str, float]
     smoothed_view: str
+    smoothed_label: str
+    smoothed_classification: str
 
 
 def analyze_video(
@@ -129,13 +150,15 @@ def analyze_video(
             continue
 
         raw = build_view_diagnostics(horse, frame_index=frame.get("frame_index"))
+        features = extract_view_features(horse)
         smoothed = smoother.update(
             ViewScores(
                 side=raw.raw_scores["side"],
                 front=raw.raw_scores["front"],
                 rear=raw.raw_scores["rear"],
                 oblique=raw.raw_scores["oblique"],
-            )
+            ),
+            features=features,
         )
         diagnostics.append(
             FrameDiagnostic(
@@ -143,6 +166,8 @@ def analyze_video(
                 raw=raw,
                 smoothed_distribution=smoothed.distribution,
                 smoothed_view=smoothed.view,
+                smoothed_label=smoothed.view_label,
+                smoothed_classification=smoothed.classification,
             )
         )
 
@@ -151,9 +176,9 @@ def analyze_video(
 
 def _mean_feature(frames: list[FrameDiagnostic], key: str) -> float | None:
     values = [
-        item.raw.features[key]
+        value
         for item in frames
-        if key in item.raw.features and not math.isnan(item.raw.features[key])
+        if (value := _feature_value(item, key)) is not None
     ]
     if not values:
         return None
@@ -232,12 +257,18 @@ def render_video_section(
     if oblique_example and rear_example:
         lines.extend(["#### Feature contrast (rear − oblique example)", ""])
         for key in FEATURE_KEYS:
-            oblique_value = oblique_example.raw.features.get(key, float("nan"))
-            rear_value = rear_example.raw.features.get(key, float("nan"))
-            if math.isnan(oblique_value) and math.isnan(rear_value):
+            oblique_value = _feature_value(oblique_example, key)
+            rear_value = _feature_value(rear_example, key)
+            if oblique_value is None and rear_value is None:
                 continue
-            delta = rear_value - oblique_value if not math.isnan(oblique_value) and not math.isnan(rear_value) else float("nan")
-            lines.append(f"- **{key}**: oblique={_fmt(oblique_value)}, rear={_fmt(rear_value)}, delta={_fmt(delta)}")
+            delta = (
+                rear_value - oblique_value
+                if oblique_value is not None and rear_value is not None
+                else None
+            )
+            lines.append(
+                f"- **{key}**: oblique={_fmt(oblique_value)}, rear={_fmt(rear_value)}, delta={_fmt(delta)}"
+            )
 
     smoothing_changes = sum(1 for item in frames if item.raw.dominant_view != item.smoothed_view)
     lines.extend(

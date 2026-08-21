@@ -10,6 +10,13 @@ from landmarks.view import aggregate_view_distribution, dominant_view_from_distr
 from models.horse import HorseInstance
 
 
+def _count_values(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
 @dataclass
 class FrameRecord:
     frame_index: int
@@ -18,6 +25,9 @@ class FrameRecord:
     view: ViewName = "unknown"
     view_confidence: float = 0.0
     view_distribution: dict[str, float] = field(default_factory=dict)
+    view_classification: str = "insufficient"
+    view_label: str = "unknown"
+    view_evidence: dict[str, dict] = field(default_factory=dict)
     observable_landmark_count: int = 0
     reliable_landmark_count: int = 0
     recording_quality: float = 0.0
@@ -60,14 +70,26 @@ class SessionHistory:
         self.video_metadata.frame_count = frame_count
         self.video_metadata.duration_sec = frame_count / self.fps if self.fps > 0 else 0.0
 
-    def _quality_summaries(self) -> tuple[dict, dict, dict]:
-        from quality.analysis_confidence import classify_analysis_confidence
+    def _quality_summaries(
+        self,
+        *,
+        dominant_view: str,
+        view_confidence: float,
+        view_distribution: dict[str, float],
+    ) -> tuple[dict, dict, dict, dict, dict]:
+        from quality.analysis_confidence import ConfidenceDimensions, build_analysis_confidence
         from quality.pose_confidence import summarize_pose_confidence
+        from quality.tracking_confidence import summarize_tracking_confidence
 
         horse_frames = self.frames_with_horses()
         if not horse_frames:
             empty = {"overall": 0.0}
-            return empty, empty, classify_analysis_confidence(0.0, 0.0).as_dict()
+            gait_stub = {"overall": None, "available": False, "reason": "gait classification not yet implemented"}
+            confidence = build_analysis_confidence(
+                ConfidenceDimensions(0.0, 0.0, 0.0, 0.0),
+                dominant_view=dominant_view,
+            ).as_dict()
+            return empty, empty, gait_stub, confidence, {"overall": 0.0, "available": True}
 
         recording_scores = [frame.recording_quality for frame in horse_frames]
         factor_keys = ("motion_blur", "horse_visibility", "occlusion", "camera_motion", "resolution")
@@ -81,12 +103,28 @@ class SessionHistory:
         }
 
         pose_summary = summarize_pose_confidence(self.frames)
-        analysis = classify_analysis_confidence(
-            recording_summary["overall"],
-            pose_summary["overall"],
-            factor_notes=factor_means,
-        )
-        return recording_summary, pose_summary, analysis.as_dict()
+        tracking_summary = summarize_tracking_confidence(self)
+        gait_summary = {
+            "overall": None,
+            "available": False,
+            "reason": "gait classification not yet implemented",
+        }
+
+        confidence = build_analysis_confidence(
+            ConfidenceDimensions(
+                recording_quality=recording_summary["overall"],
+                pose_confidence=pose_summary["overall"],
+                view_confidence=round(view_confidence * 100.0, 1),
+                tracking_confidence=tracking_summary["overall"],
+                gait_confidence=None,
+            ),
+            recording_factors=factor_means,
+            dominant_view=dominant_view,
+            view_distribution=view_distribution,
+            track_count=tracking_summary.get("track_count", 1),
+        ).as_dict()
+
+        return recording_summary, pose_summary, gait_summary, confidence, tracking_summary
 
     def get_track_ids(self) -> list[int]:
         return sorted({horse.track_id for frame in self.frames for horse in frame.horses})
@@ -248,7 +286,11 @@ class SessionHistory:
         horse_frames = self.frames_with_horses()
         reliable_counts = [frame.reliable_landmark_count for frame in horse_frames] or [0]
 
-        views = [frame.view for frame in horse_frames if frame.view != "unknown"]
+        views = [
+            frame.view
+            for frame in horse_frames
+            if frame.view_classification == "confident" and frame.view != "unknown"
+        ]
         dominant_view = max(set(views), key=views.count) if views else "unknown"
 
         from landmarks.view import ViewEstimate, ViewScores
@@ -266,20 +308,34 @@ class SessionHistory:
                 distribution=frame.view_distribution,
             )
             for frame in horse_frames
-            if frame.view_distribution
+            if frame.view_distribution and frame.view_classification == "confident"
         ]
         view_distribution = aggregate_view_distribution(frame_estimates)
         dominant_view, view_confidence = dominant_view_from_distribution(view_distribution)
         if dominant_view == "unknown":
             dominant_view = max(set(views), key=views.count) if views else "unknown"
 
-        recording_summary, pose_summary, analysis_confidence = self._quality_summaries()
+        recording_summary, pose_summary, gait_summary, confidence, tracking_summary = self._quality_summaries(
+            dominant_view=dominant_view,
+            view_confidence=view_confidence,
+            view_distribution=view_distribution,
+        )
+
+        view_summary = {
+            "dominant": dominant_view,
+            "confidence": round(view_confidence, 3),
+            "distribution": view_distribution,
+            "classification_counts": _count_values(frame.view_classification for frame in horse_frames),
+            "label_counts": _count_values(frame.view_label for frame in horse_frames if frame.view_label),
+        }
 
         return {
             "frames": len(self.frames),
             "frames_with_horses": len(horse_frames),
             "tracks": self.get_track_ids(),
             "track_stats": self.track_stats(),
+            "view": view_summary,
+            # Backward-compatible aliases for existing scripts.
             "dominant_view": dominant_view,
             "view_confidence": view_confidence,
             "view_distribution": view_distribution,
@@ -287,12 +343,14 @@ class SessionHistory:
             "max_reliable_landmarks": max(reliable_counts),
             "recording_quality": recording_summary,
             "pose_confidence": pose_summary,
-            "analysis_confidence": analysis_confidence,
+            "gait_confidence": gait_summary,
+            "tracking_confidence": tracking_summary,
+            "confidence": confidence,
         }
 
     def export_json(self, path: str | Path) -> None:
         payload = {
-            "pipeline_version": "validation-v4",
+            "pipeline_version": "validation-v6",
             "source_video": self.source_video,
             "fps": self.fps,
             "video_metadata": self.video_metadata.as_dict(),
@@ -307,6 +365,9 @@ class SessionHistory:
                     "view": frame.view,
                     "view_confidence": frame.view_confidence,
                     "view_distribution": frame.view_distribution,
+                    "view_classification": frame.view_classification,
+                    "view_label": frame.view_label,
+                    "view_evidence": frame.view_evidence,
                     "observable_landmark_count": frame.observable_landmark_count,
                     "reliable_landmark_count": frame.reliable_landmark_count,
                     "recording_quality": frame.recording_quality,

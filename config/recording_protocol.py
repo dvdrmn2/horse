@@ -29,7 +29,9 @@ RECOMMENDED_PROTOCOL = {
     ),
 }
 
-# Factor weights for overall recording quality (sum to 1.0).
+# Default factor weights for the session-level recording_quality.overall summary.
+# Measurement-specific analyses should use config.measurement_reliability instead
+# of assuming motion blur is universally dominant.
 RECORDING_QUALITY_WEIGHTS = {
     "motion_blur": 0.30,
     "horse_visibility": 0.25,

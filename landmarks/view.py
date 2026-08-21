@@ -3,8 +3,17 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 from config.landmark_spec import ViewName
+from landmarks.view_evidence import (
+    DirectionEvidence,
+    assess_view_evidence,
+    resolve_view_classification,
+)
+from landmarks.view_states import effective_view_for_measurement
+from landmarks.rear_scoring import compute_rear_score_breakdown
+from landmarks.view_features import FeatureValue
 from models.horse import HorseInstance
 
 PRIMARY_VIEWS: tuple[ViewName, ...] = ("side", "front", "rear")
@@ -63,16 +72,32 @@ class ViewFeatures:
     visible_count: int = 0
     bbox_aspect: float = 1.0
     bbox_width: float = 1.0
-    body_horizontal_span: float = 0.0
-    body_vertical_span: float = 0.0
-    eye_horizontal_sep: float = 0.0
-    eye_vertical_sep: float = 1.0
-    nose_centered: bool = False
-    head_landmarks: int = 0
+    bbox_height: float = 1.0
+    body_horizontal_span: FeatureValue = field(default_factory=FeatureValue.unavailable)
+    body_vertical_span: FeatureValue = field(default_factory=FeatureValue.unavailable)
+    eye_horizontal_sep: FeatureValue = field(default_factory=FeatureValue.unavailable)
+    eye_vertical_sep: FeatureValue = field(default_factory=FeatureValue.unavailable)
+    nose_centered: FeatureValue = field(default_factory=FeatureValue.unavailable)
+    head_landmarks_visible: int = 0
+    head_landmarks_total: int = 3
+    tail_visible: bool = False
+    withers_visible: bool = False
     tail_withers_visible: bool = False
-    stifle_sep: float = 0.0
-  # diagnostic strings for debugging
+    stifle_sep: FeatureValue = field(default_factory=FeatureValue.unavailable)
+    bilateral_symmetry: FeatureValue = field(default_factory=FeatureValue.unavailable)
     cues: tuple[str, ...] = ()
+
+    def availability_summary(self) -> dict[str, bool]:
+        return {
+            "body_horizontal_span": self.body_horizontal_span.available,
+            "body_vertical_span": self.body_vertical_span.available,
+            "stifle_separation": self.stifle_sep.available,
+            "eye_separation": self.eye_horizontal_sep.available,
+            "nose_centered": self.nose_centered.available,
+            "bilateral_symmetry": self.bilateral_symmetry.available,
+            "tail_visible": self.tail_visible,
+            "withers_visible": self.withers_visible,
+        }
 
 
 @dataclass(frozen=True)
@@ -82,10 +107,17 @@ class ViewEstimate:
     scores: ViewScores
     distribution: dict[str, float] = field(default_factory=dict)
     reason: str = ""
+    classification: str = "confident"
+    view_label: str = ""
+    ambiguous_with: tuple[str, ...] = ()
+    evidence: dict[str, dict] = field(default_factory=dict)
+    score_breakdown: dict[str, dict] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.distribution:
             object.__setattr__(self, "distribution", self.scores.normalized())
+        if not self.view_label:
+            object.__setattr__(self, "view_label", self.view)
 
 
 def _clamp01(value: float) -> float:
@@ -137,22 +169,53 @@ class ViewDiagnosticSnapshot:
     """Human-readable feature dump for view-classification debugging."""
 
     frame_index: int | None
-    features: dict[str, float]
+    features: dict[str, dict[str, Any]]
+    availability: dict[str, bool]
     raw_scores: dict[str, float]
     distribution: dict[str, float]
     dominant_view: str
     dominant_confidence: float
+    classification: str = "confident"
+    view_label: str = ""
+    evidence: dict[str, dict] = field(default_factory=dict)
+    score_breakdown: dict[str, dict] = field(default_factory=dict)
     cues: tuple[str, ...] = ()
 
     def render(self) -> str:
         lines = [f"Frame {self.frame_index if self.frame_index is not None else '?'}", "", "Features", "--------"]
-        for key, value in self.features.items():
-            lines.append(f"{key:24s} {value:.4f}" if isinstance(value, float) else f"{key:24s} {value}")
+        for key, payload in self.features.items():
+            if isinstance(payload, dict):
+                if payload.get("available"):
+                    lines.append(f"{key:24s} {payload['value']:.4f}")
+                else:
+                    lines.append(f"{key:24s} unavailable")
+            else:
+                lines.append(f"{key:24s} {payload}")
+        lines.extend(["", "Availability", "------------"])
+        for key, available in self.availability.items():
+            lines.append(f"{key:24s} {'yes' if available else 'no'}")
         lines.extend(["", "Scores", "------"])
         for key in ("side", "oblique", "rear", "front"):
             lines.append(f"{key:24s} {self.distribution.get(key, 0.0):.2f}")
         if self.cues:
             lines.extend(["", f"Cues: {'; '.join(self.cues)}"])
+        if self.evidence:
+            lines.extend(["", "Evidence", "--------"])
+            for direction, payload in self.evidence.items():
+                lines.append(f"{direction:8s} overall={payload.get('overall', '?'):10s}")
+                for cue_name, cue in payload.get("cues", {}).items():
+                    lines.append(f"           {cue_name}: {cue.get('strength')} ({cue.get('detail', '')})")
+        rear_breakdown = self.score_breakdown.get("rear")
+        if rear_breakdown:
+            lines.extend(["", "Rear score breakdown", "--------------------"])
+            lines.append(f"rear_score={rear_breakdown.get('rear_score', 0.0):.2f}  "
+                         f"strength={rear_breakdown.get('evidence_strength', '?')}")
+            for cue_name, cue in rear_breakdown.get("evidence", {}).items():
+                if cue.get("available"):
+                    lines.append(f"  {cue_name:24s} +{cue.get('contribution', 0.0):.2f}")
+                else:
+                    lines.append(f"  {cue_name:24s} unavailable")
+        lines.extend(["", f"Classification: {self.classification} ({self.view_label})"])
         return "\n".join(lines)
 
 
@@ -189,44 +252,70 @@ def build_view_diagnostics(
     """Extract diagnostic features and scores without changing the classifier."""
 
     features = extract_view_features(horse)
-    scores = compute_view_scores(features)
-    estimate = classify_view_scores(scores)
+    scores, score_breakdown = compute_view_scores(features)
+    estimate = classify_view_scores(scores, features=features, score_breakdown=score_breakdown)
     distribution = scores.normalized()
 
     x1, y1, x2, y2 = horse.bbox
     bbox_height = max(1.0, y2 - y1)
-    symmetry = _bilateral_symmetry(horse, features.bbox_width, bbox_height)
 
-    body_length = max(features.body_vertical_span, bbox_height * 0.6)
-    body_width = max(features.body_horizontal_span, features.bbox_width * 0.4)
+    body_length = (
+        features.body_vertical_span.value
+        if features.body_vertical_span.available
+        else bbox_height * 0.6
+    )
+    body_width = (
+        features.body_horizontal_span.value
+        if features.body_horizontal_span.available
+        else features.bbox_width * 0.4
+    )
     width_length_ratio = body_width / max(body_length, 1.0)
-
-    tail_visible = 1.0 if _visible_point(horse, "tail_head") else 0.0
-    withers_visible = 1.0 if _visible_point(horse, "withers") else 0.0
-    head_visibility = features.head_landmarks / 3.0
-    stifle_ratio = features.stifle_sep / max(features.bbox_width, 1.0)
+    stifle_ratio = (
+        features.stifle_sep.value / max(features.bbox_width, 1.0)
+        if features.stifle_sep.available and features.stifle_sep.value is not None
+        else None
+    )
 
     diagnostic_features = {
-        "stifle_separation_px": features.stifle_sep,
-        "stifle_separation_ratio": stifle_ratio,
-        "body_width_px": body_width,
-        "body_length_px": body_length,
-        "width_length_ratio": width_length_ratio,
-        "bbox_width_px": features.bbox_width,
-        "bbox_aspect": features.bbox_aspect,
-        "head_visibility": head_visibility,
-        "tail_visibility": tail_visible,
-        "withers_visibility": withers_visible,
-        "tail_head_absent": 1.0 if tail_visible and head_visibility == 0.0 else 0.0,
-        "left_right_symmetry": symmetry if symmetry is not None else float("nan"),
-        "visible_landmarks": float(features.visible_count),
-        "body_horizontal_span_px": features.body_horizontal_span,
-        "body_vertical_span_px": features.body_vertical_span,
+        "stifle_separation_px": features.stifle_sep.as_dict(),
+        "stifle_separation_ratio": {
+            "value": stifle_ratio,
+            "available": features.stifle_sep.available,
+        },
+        "body_horizontal_span_px": features.body_horizontal_span.as_dict(),
+        "body_vertical_span_px": features.body_vertical_span.as_dict(),
+        "body_width_px": {
+            "value": body_width,
+            "available": features.body_horizontal_span.available,
+        },
+        "body_length_px": {
+            "value": body_length,
+            "available": features.body_vertical_span.available,
+        },
+        "width_length_ratio": {
+            "value": width_length_ratio if features.body_horizontal_span.available and features.body_vertical_span.available else None,
+            "available": features.body_horizontal_span.available and features.body_vertical_span.available,
+        },
+        "bbox_width_px": {"value": features.bbox_width, "available": True},
+        "bbox_aspect": {"value": features.bbox_aspect, "available": True},
+        "head_visibility": {
+            "value": features.head_landmarks_visible / max(features.head_landmarks_total, 1),
+            "available": True,
+        },
+        "tail_visibility": {"value": float(features.tail_visible), "available": True},
+        "withers_visibility": {"value": float(features.withers_visible), "available": True},
+        "tail_head_absent": {
+            "value": float(features.tail_visible and features.head_landmarks_visible == 0),
+            "available": features.tail_visible,
+        },
+        "left_right_symmetry": features.bilateral_symmetry.as_dict(),
+        "visible_landmarks": {"value": float(features.visible_count), "available": True},
     }
 
     return ViewDiagnosticSnapshot(
         frame_index=frame_index,
         features=diagnostic_features,
+        availability=features.availability_summary(),
         raw_scores={
             "side": scores.side,
             "front": scores.front,
@@ -236,6 +325,10 @@ def build_view_diagnostics(
         distribution=distribution,
         dominant_view=estimate.view,
         dominant_confidence=estimate.confidence,
+        classification=estimate.classification,
+        view_label=estimate.view_label,
+        evidence=estimate.evidence,
+        score_breakdown=estimate.score_breakdown,
         cues=features.cues,
     )
 
@@ -254,93 +347,139 @@ def extract_view_features(horse: HorseInstance) -> ViewFeatures:
     right_stifle = _visible_point(horse, "right_stifle")
 
     visible_count = len(horse.landmarks.visible_landmarks)
+    x1, y1, x2, y2 = horse.bbox
     aspect = _bbox_aspect(horse.bbox)
     bbox_width = _bbox_width(horse.bbox)
+    bbox_height = max(1.0, y2 - y1)
 
     body_axis_points = [point for point in (nose, neck, withers, tail) if point]
-    horizontal_span = 0.0
-    vertical_span = 0.0
+    body_horizontal_span = FeatureValue.unavailable()
+    body_vertical_span = FeatureValue.unavailable()
     if len(body_axis_points) >= 2:
         xs = [point[0] for point in body_axis_points]
         ys = [point[1] for point in body_axis_points]
-        horizontal_span = max(xs) - min(xs)
-        vertical_span = max(ys) - min(ys)
+        body_horizontal_span = FeatureValue.measured(max(xs) - min(xs))
+        body_vertical_span = FeatureValue.measured(max(ys) - min(ys))
 
-    eye_horizontal_sep = abs(left_eye[0] - right_eye[0]) if left_eye and right_eye else 0.0
-    eye_vertical_sep = (
-        max(abs(left_eye[1] - right_eye[1]), 1.0) if left_eye and right_eye else 1.0
+    eye_horizontal_sep = FeatureValue.unavailable()
+    eye_vertical_sep = FeatureValue.unavailable()
+    nose_centered = FeatureValue.unavailable()
+    if left_eye and right_eye:
+        eye_horizontal_sep = FeatureValue.measured(abs(left_eye[0] - right_eye[0]))
+        eye_vertical_sep = FeatureValue.measured(max(abs(left_eye[1] - right_eye[1]), 1.0))
+        if nose:
+            eye_sep = abs(left_eye[0] - right_eye[0])
+            nose_mid_x = (left_eye[0] + right_eye[0]) / 2.0
+            nose_centered = FeatureValue.measured(
+                1.0 if abs(nose[0] - nose_mid_x) < eye_sep * 0.35 else 0.0
+            )
+
+    head_landmarks_visible = sum(1 for point in (nose, left_eye, right_eye) if point)
+    tail_visible = tail is not None
+    withers_visible = withers is not None
+    tail_withers_visible = tail_visible and withers_visible
+
+    stifle_sep = FeatureValue.unavailable()
+    if left_stifle and right_stifle:
+        stifle_sep = FeatureValue.measured(abs(left_stifle[0] - right_stifle[0]))
+
+    symmetry_value = _bilateral_symmetry(horse, bbox_width, bbox_height)
+    bilateral_symmetry = (
+        FeatureValue.measured(symmetry_value)
+        if symmetry_value is not None
+        else FeatureValue.unavailable()
     )
-    nose_centered = False
-    if left_eye and right_eye and nose:
-        eye_sep = abs(left_eye[0] - right_eye[0])
-        nose_mid_x = (left_eye[0] + right_eye[0]) / 2.0
-        nose_centered = abs(nose[0] - nose_mid_x) < eye_sep * 0.35
-
-    head_landmarks = sum(1 for point in (nose, left_eye, right_eye) if point)
-    tail_withers_visible = bool(tail and withers)
-    stifle_sep = abs(left_stifle[0] - right_stifle[0]) if left_stifle and right_stifle else 0.0
 
     cues: list[str] = []
-    if nose_centered and eye_horizontal_sep > eye_vertical_sep * 1.2:
+    if (
+        nose_centered.available
+        and nose_centered.value == 1.0
+        and eye_horizontal_sep.available
+        and eye_vertical_sep.available
+        and eye_horizontal_sep.value > eye_vertical_sep.value * 1.2
+    ):
         cues.append("front-facing head geometry")
-    if horizontal_span > max(vertical_span * 0.85, 30):
+    if (
+        body_horizontal_span.available
+        and body_vertical_span.available
+        and body_horizontal_span.value > max(body_vertical_span.value * 0.85, 30)
+    ):
         cues.append("elongated body axis")
     if aspect > 1.1:
         cues.append(f"wide bbox aspect {aspect:.2f}")
-    if tail_withers_visible and head_landmarks == 0:
+    if tail_withers_visible and head_landmarks_visible == 0:
         cues.append("tail/withers without head")
-    if stifle_sep > bbox_width * 0.28 and horizontal_span < max(vertical_span * 1.1, 40):
+    if (
+        stifle_sep.available
+        and body_horizontal_span.available
+        and body_vertical_span.available
+        and stifle_sep.value > bbox_width * 0.28
+        and body_horizontal_span.value < max(body_vertical_span.value * 1.1, 40)
+    ):
         cues.append("wide stifle separation with compact body")
+    if not stifle_sep.available and (left_stifle or right_stifle):
+        cues.append("single stifle only — separation unavailable")
 
     return ViewFeatures(
         visible_count=visible_count,
         bbox_aspect=aspect,
         bbox_width=bbox_width,
-        body_horizontal_span=horizontal_span,
-        body_vertical_span=vertical_span,
+        bbox_height=bbox_height,
+        body_horizontal_span=body_horizontal_span,
+        body_vertical_span=body_vertical_span,
         eye_horizontal_sep=eye_horizontal_sep,
         eye_vertical_sep=eye_vertical_sep,
         nose_centered=nose_centered,
-        head_landmarks=head_landmarks,
+        head_landmarks_visible=head_landmarks_visible,
+        tail_visible=tail_visible,
+        withers_visible=withers_visible,
         tail_withers_visible=tail_withers_visible,
         stifle_sep=stifle_sep,
+        bilateral_symmetry=bilateral_symmetry,
         cues=tuple(cues),
     )
 
 
-def compute_view_scores(features: ViewFeatures) -> ViewScores:
-    """Map geometric features to continuous view scores."""
+def compute_view_scores(features: ViewFeatures) -> tuple[ViewScores, dict[str, dict]]:
+    """Map geometric features to continuous view scores.
+
+    Unavailable features contribute no evidence — they are not treated as zero.
+    Returns scores plus an internal per-direction score breakdown for debugging.
+    """
 
     if features.visible_count == 0:
-        return ViewScores()
+        return ViewScores(), {}
 
-    elongation_ratio = features.body_horizontal_span / max(features.body_vertical_span, 1.0)
-    elongated_body = _sigmoid(elongation_ratio, center=0.9, scale=0.15)
-    elongated_body *= _sigmoid(features.body_horizontal_span, center=30.0, scale=12.0)
+    side_score = 0.0
+    if features.body_horizontal_span.available and features.body_vertical_span.available:
+        horizontal_span = features.body_horizontal_span.value or 0.0
+        vertical_span = max(features.body_vertical_span.value or 1.0, 1.0)
+        elongation_ratio = horizontal_span / vertical_span
+        elongated_body = _sigmoid(elongation_ratio, center=0.9, scale=0.15)
+        elongated_body *= _sigmoid(horizontal_span, center=30.0, scale=12.0)
+        side_score = max(side_score, elongated_body)
+
     wide_bbox = _sigmoid(features.bbox_aspect, center=1.15, scale=0.08)
-    side_score = max(elongated_body, wide_bbox * 0.85)
+    side_score = max(side_score, wide_bbox * 0.85)
 
-    eye_ratio = features.eye_horizontal_sep / max(features.eye_vertical_sep, 1.0)
-    front_face = _sigmoid(eye_ratio, center=1.4, scale=0.2)
-    if features.nose_centered:
-        front_face = min(1.0, front_face + 0.25)
-    front_score = front_face if features.head_landmarks >= 2 else 0.0
+    front_score = 0.0
+    if (
+        features.eye_horizontal_sep.available
+        and features.eye_vertical_sep.available
+        and features.head_landmarks_visible >= 2
+    ):
+        eye_ratio = (features.eye_horizontal_sep.value or 0.0) / max(
+            features.eye_vertical_sep.value or 1.0, 1.0
+        )
+        front_face = _sigmoid(eye_ratio, center=1.4, scale=0.2)
+        if features.nose_centered.available and features.nose_centered.value == 1.0:
+            front_face = min(1.0, front_face + 0.25)
+        front_score = front_face
 
-    stifle_ratio = features.stifle_sep / max(features.bbox_width, 1.0)
-    compact_body = 1.0 - _sigmoid(
-        features.body_horizontal_span / max(features.body_vertical_span, 1.0),
-        center=0.95,
-        scale=0.12,
-    )
-    rear_stifle = _sigmoid(stifle_ratio, center=0.28, scale=0.05) * compact_body
-    rear_tail = 0.85 if features.tail_withers_visible and features.head_landmarks == 0 else 0.0
-    rear_score = max(rear_stifle, rear_tail)
-    if features.head_landmarks >= 2 and features.nose_centered:
-        rear_score *= 0.35
-    elif features.head_landmarks >= 1 and rear_tail > 0:
-        rear_score = max(rear_score, rear_tail)
+    rear_breakdown = compute_rear_score_breakdown(features)
+    rear_score = rear_breakdown.rear_score
 
-    if rear_stifle > 0.35 or rear_tail > 0:
+    if rear_score > 0.35:
         side_score *= 0.55
 
     primary_scores = sorted((side_score, front_score, rear_score))
@@ -359,12 +498,17 @@ def compute_view_scores(features: ViewFeatures) -> ViewScores:
         front=front_score,
         rear=rear_score,
         oblique=oblique_score,
-    )
+    ), {"rear": rear_breakdown.as_dict()}
 
 
-def classify_view_scores(scores: ViewScores) -> ViewEstimate:
-    view, confidence = scores.dominant()
+def classify_view_scores(
+    scores: ViewScores,
+    *,
+    features: ViewFeatures | None = None,
+    score_breakdown: dict[str, dict] | None = None,
+) -> ViewEstimate:
     distribution = scores.normalized()
+    view, confidence = scores.dominant()
 
     if view == "unknown":
         return ViewEstimate(
@@ -372,25 +516,32 @@ def classify_view_scores(scores: ViewScores) -> ViewEstimate:
             confidence=1.0,
             scores=scores,
             distribution=distribution,
+            classification="insufficient",
+            view_label="unknown",
             reason="insufficient view cues",
         )
 
-    reason_parts = []
-    ordered = sorted(
-        ((name, distribution.get(name, 0.0)) for name in ("side", "front", "rear", "oblique")),
-        key=lambda item: item[1],
-        reverse=True,
-    )
-    for name, value in ordered[:2]:
-        if value >= 0.08:
-            reason_parts.append(f"{name}={value:.2f}")
+    evidence = assess_view_evidence(features, scores) if features is not None else {
+        name: DirectionEvidence("unavailable", {}) for name in ("side", "front", "rear")
+    }
+    evidence_dict = {name: direction.as_dict() for name, direction in evidence.items()}
+    resolved = resolve_view_classification(distribution, evidence, raw_scores=scores)
+
+    reason = resolved.reason
+    if features and features.cues:
+        reason = f"{reason}; {'; '.join(features.cues[:2])}"
 
     return ViewEstimate(
-        view=view,
-        confidence=confidence,
+        view=effective_view_for_measurement(resolved.dominant_view, resolved.classification),
+        confidence=resolved.confidence,
         scores=scores,
         distribution=distribution,
-        reason=", ".join(reason_parts) if reason_parts else view,
+        classification=resolved.classification,
+        view_label=resolved.view_label,
+        ambiguous_with=resolved.ambiguous_with,
+        evidence=evidence_dict,
+        score_breakdown=score_breakdown or {},
+        reason=reason,
     )
 
 
@@ -404,33 +555,28 @@ def average_view_scores(scores: list[ViewScores]) -> ViewScores:
 
 
 class ViewSmoother:
-    """Temporal smoothing over continuous view scores."""
+    """Temporal smoothing over continuous view scores.
+
+    TODO: make evidence-aware — average scores together with per-frame evidence
+    strength so insufficient frames do not drift into oblique via score-only means.
+  """
 
     def __init__(self, window: int = 15) -> None:
         self._history: deque[ViewScores] = deque(maxlen=window)
 
-    def update(self, raw_scores: ViewScores) -> ViewEstimate:
+    def update(self, raw_scores: ViewScores, *, features: ViewFeatures | None = None, score_breakdown: dict[str, dict] | None = None) -> ViewEstimate:
         if sum(raw_scores.normalized().values()) > 0:
             self._history.append(raw_scores)
         if not self._history:
-            return classify_view_scores(raw_scores)
+            return classify_view_scores(raw_scores, features=features, score_breakdown=score_breakdown)
         smoothed = average_view_scores(list(self._history))
-        return classify_view_scores(smoothed)
+        return classify_view_scores(smoothed, features=features, score_breakdown=score_breakdown)
 
 
 def estimate_view_from_horse(horse: HorseInstance) -> ViewEstimate:
     features = extract_view_features(horse)
-    scores = compute_view_scores(features)
-    estimate = classify_view_scores(scores)
-    if features.cues and estimate.view != "unknown":
-        return ViewEstimate(
-            view=estimate.view,
-            confidence=estimate.confidence,
-            scores=estimate.scores,
-            distribution=estimate.distribution,
-            reason="; ".join(features.cues[:2]),
-        )
-    return estimate
+    scores, score_breakdown = compute_view_scores(features)
+    return classify_view_scores(scores, features=features, score_breakdown=score_breakdown)
 
 
 def estimate_camera_view(horses: list[HorseInstance]) -> ViewName:

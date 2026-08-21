@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 
 from config.config import KEYPOINT_SCORE_THRESHOLD
 from config.landmark_spec import LANDMARK_DEFINITIONS, ViewName, observable_landmarks_for_view
+from landmarks.view_states import effective_view_for_measurement
 from landmarks.temporal import get_motion_profile, is_streaming_outlier
 from models.landmark import Landmark
 from models.landmark_types import LandmarkStatus
@@ -41,7 +42,8 @@ class LandmarkQualityController:
     _last_bbox: dict[int, list[float]] = field(default_factory=dict)
 
     def refine(self, frame: FrameRecord) -> FrameRecord:
-        observable_names = set(observable_landmarks_for_view(frame.view, min_score=0.45))
+        measurement_view = effective_view_for_measurement(frame.view, frame.view_classification)
+        observable_names = set(observable_landmarks_for_view(measurement_view, min_score=0.45))
         reliable_count = 0
 
         for horse in frame.horses:
@@ -56,7 +58,7 @@ class LandmarkQualityController:
                 updated = self._score_landmark(
                     horse.track_id,
                     landmark,
-                    frame.view,
+                    measurement_view,
                     max_jump,
                     observable_names,
                     horse.identity_confidence,

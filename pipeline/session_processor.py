@@ -5,8 +5,6 @@ from dataclasses import replace
 from detection.detector import HorseDetector
 from detection.pose_estimator import PoseEstimator
 from landmarks.quality import LandmarkQualityController
-from quality.pose_confidence import compute_frame_pose_confidence
-from quality.recording import RecordingQualityAssessor
 from landmarks.view import (
     ViewEstimate,
     ViewScores,
@@ -16,6 +14,9 @@ from landmarks.view import (
     estimate_identity_confidence,
     extract_view_features,
 )
+from quality.pose_confidence import compute_frame_pose_confidence
+from quality.recording import RecordingQualityAssessor
+from landmarks.view_states import effective_view_for_measurement
 from models.horse import HorseInstance
 from models.session import FrameRecord, SessionHistory
 from tracking.tracker import HorseTracker
@@ -55,10 +56,21 @@ class VideoSessionProcessor:
             reverse=True,
         )
         for horse in ranked:
-            raw_scores = compute_view_scores(extract_view_features(horse))
+            features = extract_view_features(horse)
+            raw_scores, score_breakdown = compute_view_scores(features)
             if sum(raw_scores.normalized().values()) > 0:
-                return self._view_smoother.update(raw_scores)
-        return self._view_smoother.update(compute_view_scores(extract_view_features(ranked[0])))
+                return self._view_smoother.update(
+                    raw_scores,
+                    features=features,
+                    score_breakdown=score_breakdown,
+                )
+        features = extract_view_features(ranked[0])
+        raw_scores, score_breakdown = compute_view_scores(features)
+        return self._view_smoother.update(
+            raw_scores,
+            features=features,
+            score_breakdown=score_breakdown,
+        )
 
     def process_frame(self, frame, frame_index: int) -> FrameRecord:
         timestamp_sec = frame_index / self.session.fps if self.session.fps > 0 else None
@@ -88,9 +100,16 @@ class VideoSessionProcessor:
         frame_record.view = view_estimate.view
         frame_record.view_confidence = view_estimate.confidence
         frame_record.view_distribution = view_estimate.distribution
+        frame_record.view_classification = view_estimate.classification
+        frame_record.view_label = view_estimate.view_label
+        frame_record.view_evidence = view_estimate.evidence
 
         for horse in frame_record.horses:
-            horse.identity_confidence = estimate_identity_confidence(horse, frame_record.view)
+            measurement_view = effective_view_for_measurement(
+                frame_record.view,
+                frame_record.view_classification,
+            )
+            horse.identity_confidence = estimate_identity_confidence(horse, measurement_view)
             if horse.landmarks is None:
                 continue
 

@@ -141,8 +141,9 @@ def analyze_trajectory_views(
             estimate_confidence = float(frame.get("view_confidence", 0.0))
             distribution = dict(frame.get("view_distribution", {}))
         else:
-            raw_scores = compute_view_scores(extract_view_features(horse))
-            estimate = smoother.update(raw_scores)
+            features = extract_view_features(horse)
+            raw_scores, score_breakdown = compute_view_scores(features)
+            estimate = smoother.update(raw_scores, features=features, score_breakdown=score_breakdown)
             estimate_view = estimate.view
             estimate_confidence = estimate.confidence
             distribution = estimate.distribution
