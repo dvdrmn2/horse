@@ -9,6 +9,7 @@ from enum import Enum
 from statistics import median
 from typing import Iterable, Sequence
 
+from landmarks.body_frame import BodyFrame
 from config.landmark_spec import LANDMARK_DEFINITIONS
 
 
@@ -102,22 +103,12 @@ class TrajectoryMetrics:
 
 
 def get_motion_profile(landmark_name: str) -> MotionProfile:
-    if landmark_name in STATIC_LANDMARKS:
-        return MotionProfile.STATIC
-    if landmark_name in MODERATE_LANDMARKS:
-        return MotionProfile.MODERATE
-    if landmark_name in DYNAMIC_LANDMARKS:
-        return MotionProfile.DYNAMIC
+    from config.landmark_profiles import get_landmark_profile
 
-    definition = LANDMARK_DEFINITIONS.get(landmark_name)
-    if definition is None:
-        return MotionProfile.MODERATE
-
-    if definition.category == "torso":
+    profile = get_landmark_profile(landmark_name)
+    if profile.motion == "static":
         return MotionProfile.STATIC
-    if definition.name.endswith("_hoof") or definition.name.endswith("_fetlock"):
-        return MotionProfile.DYNAMIC
-    if definition.name.endswith("_carpus") or definition.name.endswith("_hock"):
+    if profile.motion == "dynamic":
         return MotionProfile.DYNAMIC
     return MotionProfile.MODERATE
 
@@ -185,22 +176,10 @@ def normalize_to_body_axis(
     withers: Point2D,
     tail: Point2D,
 ) -> tuple[float, float] | None:
-    axis_x = tail.x - withers.x
-    axis_y = tail.y - withers.y
-    axis_length = math.hypot(axis_x, axis_y)
-    if axis_length < 1.0:
+    frame = BodyFrame.from_points((withers.x, withers.y), (tail.x, tail.y))
+    if frame is None:
         return None
-
-    unit_x = axis_x / axis_length
-    unit_y = axis_y / axis_length
-    perp_x = -unit_y
-    perp_y = unit_x
-
-    rel_x = x - withers.x
-    rel_y = y - withers.y
-    longitudinal = rel_x * unit_x + rel_y * unit_y
-    lateral = rel_x * perp_x + rel_y * perp_y
-    return (longitudinal / axis_length, lateral / axis_length)
+    return frame.to_body(x, y)
 
 
 def compute_kinematics(points: Sequence[Point2D]) -> list[KinematicSample]:

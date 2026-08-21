@@ -6,76 +6,31 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from landmarks.body_frame import extract_body_points
 from landmarks.temporal import (
     Point2D,
     compute_kinematics,
     detect_spike_indices,
     get_motion_profile,
     normalize_to_bbox,
-    normalize_to_body_axis,
 )
 
 
 def load_points(payload: dict, track_id: int, landmark_name: str) -> list[dict]:
-    points: list[dict] = []
-
-    for frame in payload.get("frames", []):
-        horse = next(
-            (item for item in frame.get("horses", []) if item.get("track_id") == track_id),
-            None,
-        )
-        if horse is None:
-            continue
-
-        landmark = next(
-            (item for item in horse.get("landmarks", []) if item.get("name") == landmark_name),
-            None,
-        )
-        if landmark is None or landmark.get("x") is None or landmark.get("y") is None:
-            continue
-        if landmark.get("status") in {"unmapped", "unavailable", "not_visible"}:
-            continue
-
-        withers = next((item for item in horse.get("landmarks", []) if item.get("name") == "withers"), None)
-        tail = next((item for item in horse.get("landmarks", []) if item.get("name") == "tail_head"), None)
-        body_coords = None
-        if (
-            withers
-            and tail
-            and withers.get("x") is not None
-            and tail.get("x") is not None
-        ):
-            body_coords = normalize_to_body_axis(
-                landmark["x"],
-                landmark["y"],
-                Point2D(withers["x"], withers["y"]),
-                Point2D(tail["x"], tail["y"]),
-            )
-
-        bbox = horse.get("bbox")
-        bbox_coords = normalize_to_bbox(landmark["x"], landmark["y"], bbox) if bbox else None
-
-        points.append(
-            {
-                "frame": frame.get("frame_index"),
-                "timestamp_sec": frame.get("timestamp_sec"),
-                "x": landmark["x"],
-                "y": landmark["y"],
-                "bbox_x": bbox_coords[0] if bbox_coords else None,
-                "bbox_y": bbox_coords[1] if bbox_coords else None,
-                "body_long": body_coords[0] if body_coords else None,
-                "body_lat": body_coords[1] if body_coords else None,
-                "outlier": landmark.get("outlier", False),
-                "status": landmark.get("status"),
-            }
-        )
-
+    points = extract_body_points(payload.get("frames", []), track_id, landmark_name)
+    for point in points:
+        if point.get("bbox"):
+            point["bbox_x"], point["bbox_y"] = normalize_to_bbox(point["x"], point["y"], point["bbox"])
+        else:
+            point["bbox_x"] = None
+            point["bbox_y"] = None
     return points
 
 
@@ -187,7 +142,15 @@ def main() -> None:
     elif args.space == "body":
         x_key, y_key = "body_long", "body_lat"
         space_label = "body-axis-normalized"
-        points = [point for point in points if point.get(x_key) is not None and point.get(y_key) is not None]
+        points = [
+            point
+            for point in points
+            if point.get(x_key) is not None
+            and point.get(y_key) is not None
+            and point.get("body_frame_quality") != "unavailable"
+        ]
+        qualities = Counter(point.get("body_frame_quality") for point in points)
+        print(f"body frame quality: {dict(qualities)}")
     else:
         x_key, y_key = "x", "y"
         space_label = "video pixels"

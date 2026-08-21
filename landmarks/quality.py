@@ -98,6 +98,14 @@ class LandmarkQualityController:
 
         updated = replace(landmark, effective_confidence=effective)
 
+        if updated.raw_x is None and updated.x is not None:
+            updated = replace(
+                updated,
+                raw_x=updated.x,
+                raw_y=updated.y,
+                raw_confidence=landmark.confidence if landmark.confidence is not None else base_confidence,
+            )
+
         if not updated.visible or updated.x is None or updated.y is None:
             return updated
 
@@ -121,6 +129,9 @@ class LandmarkQualityController:
                 updated,
                 outlier=True,
                 visible=False,
+                x=None,
+                y=None,
+                confidence=None,
                 effective_confidence=min(effective, KEYPOINT_SCORE_THRESHOLD * 0.5),
             )
             return updated

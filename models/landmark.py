@@ -15,6 +15,9 @@ class Landmark:
     x: float | None = None
     y: float | None = None
     confidence: float | None = None
+    raw_x: float | None = None
+    raw_y: float | None = None
+    raw_confidence: float | None = None
     status: LandmarkStatus = LandmarkStatus.UNAVAILABLE
     source: LandmarkSource = LandmarkSource.NONE
     visible: bool = False
@@ -94,6 +97,9 @@ class LandmarkSet:
                         x=float(x),
                         y=float(y),
                         confidence=score,
+                        raw_x=float(x),
+                        raw_y=float(y),
+                        raw_confidence=score,
                         status=LandmarkStatus.DETECTED,
                         source=source,
                         visible=True,
@@ -108,6 +114,9 @@ class LandmarkSet:
                         x=float(x),
                         y=float(y),
                         confidence=score,
+                        raw_x=float(x),
+                        raw_y=float(y),
+                        raw_confidence=score,
                         status=LandmarkStatus.LOW_CONFIDENCE,
                         source=source,
                         visible=True,
@@ -120,6 +129,7 @@ class LandmarkSet:
                         name=name,
                         index=index,
                         confidence=score,
+                        raw_confidence=score,
                         status=LandmarkStatus.NOT_VISIBLE,
                         source=source,
                         visible=False,
@@ -151,6 +161,9 @@ class LandmarkSet:
             x=x,
             y=y,
             confidence=confidence,
+            raw_x=x,
+            raw_y=y,
+            raw_confidence=confidence,
             visible=visible,
             effective_confidence=confidence,
             identity_confidence=identity_confidence,

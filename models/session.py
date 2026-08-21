@@ -46,13 +46,21 @@ class SessionHistory:
                 continue
 
             landmark = horse.landmarks.get(landmark_name)
-            if landmark is None or landmark.x is None or landmark.y is None:
+            if landmark is None:
                 continue
-            if not landmark.visible and not include_unreliable:
+
+            has_validated = landmark.x is not None and landmark.y is not None
+            has_raw = landmark.raw_x is not None and landmark.raw_y is not None
+            if not has_validated and not has_raw:
                 continue
-            if landmark.outlier and not include_outliers:
+            if not has_validated:
+                if not include_outliers:
+                    continue
+            elif not landmark.visible and not include_unreliable:
                 continue
-            if not include_unreliable and not landmark.is_reliable:
+            elif landmark.outlier and not include_outliers:
+                continue
+            elif not include_unreliable and not landmark.is_reliable:
                 continue
 
             points.append(
@@ -62,6 +70,9 @@ class SessionHistory:
                     "x": landmark.x,
                     "y": landmark.y,
                     "confidence": landmark.confidence,
+                    "raw_x": landmark.raw_x,
+                    "raw_y": landmark.raw_y,
+                    "raw_confidence": landmark.raw_confidence,
                     "effective_confidence": landmark.effective_confidence,
                     "status": landmark.status.value,
                     "source": landmark.source.value,
@@ -191,6 +202,7 @@ class SessionHistory:
 
     def export_json(self, path: str | Path) -> None:
         payload = {
+            "pipeline_version": "validation-v2",
             "source_video": self.source_video,
             "fps": self.fps,
             "summary": self.summary(),
@@ -213,6 +225,9 @@ class SessionHistory:
                                     "x": landmark.x,
                                     "y": landmark.y,
                                     "confidence": landmark.confidence,
+                                    "raw_x": landmark.raw_x,
+                                    "raw_y": landmark.raw_y,
+                                    "raw_confidence": landmark.raw_confidence,
                                     "effective_confidence": landmark.effective_confidence,
                                     "status": landmark.status.value,
                                     "source": landmark.source.value,
