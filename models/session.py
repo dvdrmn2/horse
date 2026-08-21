@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from config.landmark_spec import ViewName
+from config.recording_protocol import RECOMMENDED_PROTOCOL
+from landmarks.view import aggregate_view_distribution, dominant_view_from_distribution
 from models.horse import HorseInstance
 
 
@@ -14,18 +16,77 @@ class FrameRecord:
     timestamp_sec: float | None
     horses: list[HorseInstance]
     view: ViewName = "unknown"
+    view_confidence: float = 0.0
+    view_distribution: dict[str, float] = field(default_factory=dict)
     observable_landmark_count: int = 0
     reliable_landmark_count: int = 0
+    recording_quality: float = 0.0
+    recording_quality_factors: dict[str, float] = field(default_factory=dict)
+    pose_confidence: float = 0.0
+
+
+@dataclass
+class VideoMetadata:
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    frame_count: int = 0
+    duration_sec: float = 0.0
+
+    def as_dict(self) -> dict:
+        return {
+            "width": self.width,
+            "height": self.height,
+            "fps": self.fps,
+            "frame_count": self.frame_count,
+            "duration_sec": self.duration_sec,
+        }
 
 
 @dataclass
 class SessionHistory:
     source_video: str
     fps: float
+    video_metadata: VideoMetadata = field(default_factory=VideoMetadata)
     frames: list[FrameRecord] = field(default_factory=list)
 
     def add(self, frame: FrameRecord) -> None:
         self.frames.append(frame)
+
+    def finalize(self, *, frame_count: int, width: int, height: int) -> None:
+        self.video_metadata.width = width
+        self.video_metadata.height = height
+        self.video_metadata.fps = self.fps
+        self.video_metadata.frame_count = frame_count
+        self.video_metadata.duration_sec = frame_count / self.fps if self.fps > 0 else 0.0
+
+    def _quality_summaries(self) -> tuple[dict, dict, dict]:
+        from quality.analysis_confidence import classify_analysis_confidence
+        from quality.pose_confidence import summarize_pose_confidence
+
+        horse_frames = self.frames_with_horses()
+        if not horse_frames:
+            empty = {"overall": 0.0}
+            return empty, empty, classify_analysis_confidence(0.0, 0.0).as_dict()
+
+        recording_scores = [frame.recording_quality for frame in horse_frames]
+        factor_keys = ("motion_blur", "horse_visibility", "occlusion", "camera_motion", "resolution")
+        factor_means = {
+            key: sum(frame.recording_quality_factors.get(key, 0.0) for frame in horse_frames) / len(horse_frames)
+            for key in factor_keys
+        }
+        recording_summary = {
+            "overall": round(sum(recording_scores) / len(recording_scores), 1),
+            "factors": {key: round(value, 1) for key, value in factor_means.items()},
+        }
+
+        pose_summary = summarize_pose_confidence(self.frames)
+        analysis = classify_analysis_confidence(
+            recording_summary["overall"],
+            pose_summary["overall"],
+            factor_notes=factor_means,
+        )
+        return recording_summary, pose_summary, analysis.as_dict()
 
     def get_track_ids(self) -> list[int]:
         return sorted({horse.track_id for frame in self.frames for horse in frame.horses})
@@ -190,29 +251,67 @@ class SessionHistory:
         views = [frame.view for frame in horse_frames if frame.view != "unknown"]
         dominant_view = max(set(views), key=views.count) if views else "unknown"
 
+        from landmarks.view import ViewEstimate, ViewScores
+
+        frame_estimates = [
+            ViewEstimate(
+                view=frame.view,
+                confidence=frame.view_confidence,
+                scores=ViewScores(
+                    side=frame.view_distribution.get("side", 0.0),
+                    front=frame.view_distribution.get("front", 0.0),
+                    rear=frame.view_distribution.get("rear", 0.0),
+                    oblique=frame.view_distribution.get("oblique", 0.0),
+                ),
+                distribution=frame.view_distribution,
+            )
+            for frame in horse_frames
+            if frame.view_distribution
+        ]
+        view_distribution = aggregate_view_distribution(frame_estimates)
+        dominant_view, view_confidence = dominant_view_from_distribution(view_distribution)
+        if dominant_view == "unknown":
+            dominant_view = max(set(views), key=views.count) if views else "unknown"
+
+        recording_summary, pose_summary, analysis_confidence = self._quality_summaries()
+
         return {
             "frames": len(self.frames),
             "frames_with_horses": len(horse_frames),
             "tracks": self.get_track_ids(),
             "track_stats": self.track_stats(),
             "dominant_view": dominant_view,
+            "view_confidence": view_confidence,
+            "view_distribution": view_distribution,
             "avg_reliable_landmarks": sum(reliable_counts) / len(reliable_counts),
             "max_reliable_landmarks": max(reliable_counts),
+            "recording_quality": recording_summary,
+            "pose_confidence": pose_summary,
+            "analysis_confidence": analysis_confidence,
         }
 
     def export_json(self, path: str | Path) -> None:
         payload = {
-            "pipeline_version": "validation-v2",
+            "pipeline_version": "validation-v4",
             "source_video": self.source_video,
             "fps": self.fps,
+            "video_metadata": self.video_metadata.as_dict(),
+            "recording_protocol": {
+                "trainer_message": RECOMMENDED_PROTOCOL["trainer_message"],
+            },
             "summary": self.summary(),
             "frames": [
                 {
                     "frame_index": frame.frame_index,
                     "timestamp_sec": frame.timestamp_sec,
                     "view": frame.view,
+                    "view_confidence": frame.view_confidence,
+                    "view_distribution": frame.view_distribution,
                     "observable_landmark_count": frame.observable_landmark_count,
                     "reliable_landmark_count": frame.reliable_landmark_count,
+                    "recording_quality": frame.recording_quality,
+                    "recording_quality_factors": frame.recording_quality_factors,
+                    "pose_confidence": frame.pose_confidence,
                     "horses": [
                         {
                             "track_id": horse.track_id,

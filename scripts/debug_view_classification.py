@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from landmarks.view import _estimate_view_from_horse
+from landmarks.view import estimate_view_from_horse
 from models.horse import HorseInstance
 from models.landmark import Landmark, LandmarkSet
 from models.landmark_types import LandmarkSource, LandmarkStatus
@@ -74,7 +74,7 @@ def main() -> None:
         horse = horse_from_frame(frame, args.track)
         if horse is None:
             continue
-        estimate = _estimate_view_from_horse(horse)
+        estimate = estimate_view_from_horse(horse)
         counts[estimate.view] += 1
         reasons[estimate.reason] += 1
         bucket = examples.setdefault(estimate.view, [])

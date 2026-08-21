@@ -53,6 +53,8 @@ def main() -> None:
         pose_estimator,
         source_video=INPUT_VIDEO,
         fps=video.fps if video.fps and video.fps > 0 else 25.0,
+        frame_width=video.width,
+        frame_height=video.height,
     )
 
     writer = None
@@ -90,6 +92,12 @@ def main() -> None:
         frame_count += 1
 
     video.release()
+
+    processor.session.finalize(
+        frame_count=frame_count,
+        width=video.width,
+        height=video.height,
+    )
 
     if writer is not None:
         writer.release()

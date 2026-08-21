@@ -174,7 +174,7 @@ def body_velocity(
 def _view_for_body_frame(horse: dict) -> ViewName:
     """Recompute view from landmarks instead of using stale stored frame view."""
 
-    from landmarks.view import _estimate_view_from_horse
+    from landmarks.view import estimate_view_from_horse
     from models.horse import HorseInstance
     from models.landmark_types import LandmarkSource, LandmarkStatus
 
@@ -203,7 +203,7 @@ def _view_for_body_frame(horse: dict) -> ViewName:
             schema=tuple(item["name"] for item in horse.get("landmarks", [])),
         ),
     )
-    return _estimate_view_from_horse(instance).view
+    return estimate_view_from_horse(instance).view
 
 
 def extract_body_points(
